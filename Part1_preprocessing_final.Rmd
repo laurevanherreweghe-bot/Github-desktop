@@ -158,6 +158,7 @@ table(protein_annotation_clean$pct_below_lod > 50)
 ```
 --> 150 EW hebben meer dan 50% van hun metingen onder LOD
 --> Proteins with more than 50% of values below the LOD were excluded because the majority of observations could not be quantified with sufficient confidence
+Na het verwijderen van de 150 eiwitten met >50% metingen onder de LOD blijft nog 0,21% van de datapunten ontbrekend (NA); dit wordt vrijwel volledig verklaard door 13 eiwitten die in één specifieke Olink-batch (20201752 of Q-04064) niet gemeten zijn, maar in de overige batches wel betrouwbaar gekwantificeerd werden.
 
 ```{r}
 # Verwijder eiwitten met >50% metingen onder LOD
