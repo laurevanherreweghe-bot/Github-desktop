@@ -1,0 +1,434 @@
+---
+title: "Part1_preprocessing_final"
+output: html_document
+date: "2026-11-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+library(tidyverse)
+```
+
+1. Data import
+```{r}
+# data import
+proteins_npx_raw <- read_csv("proteins_npx_raw.csv")
+sample_metadata <- read_csv("sample_metadata.csv")
+protein_annotation <- read_csv("protein_annotation.csv")
+```
+
+```{r}
+# Controleer dimensies en unieke ID's
+dim(sample_metadata)
+dim(proteins_npx_raw)
+dim(protein_annotation)
+sum(is.na(sample_metadata$sample_kit_id))
+sum(is.na(proteins_npx_raw$sample_kit_id))
+```
+```{r}
+# Bevestig dat de stalen in dezelfde volgorde staan en toon aan dat er maar 96 personen zijn
+identical(proteins_npx_raw$sample_kit_id,sample_metadata$sample_kit_id)
+n_distinct(sample_metadata$subject.subjectGuid)
+```
+
+2. Variabeletypes bepalen
+
+```{r}
+#variabeletypes bepalen van 
+table(sapply(sample_metadata, class))
+table(sapply(proteins_npx_raw, class))
+sapply(sample_metadata, class)
+```
+
+3. missing values
+missing values in metadata:
+```{r}
+#globale missingness
+sum(is.na(sample_metadata))
+mean(is.na(sample_metadata))*100
+```
+
+```{r}
+missing_meta <- sample_metadata %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "missing_values") %>%
+  mutate(Missing_Percentage = (missing_values / nrow(sample_metadata)) * 100) %>%
+  arrange(desc(Missing_Percentage))
+
+print(missing_meta, n = 60)
+```
+```{r}
+missing_meta %>%
+  filter(Missing_Percentage > 0) %>%
+  ggplot(aes(x = reorder(Variable, Missing_Percentage), y = Missing_Percentage)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Percentage of Missing Values in Metadata (Variables with >0% missing)",
+    x = "Variables",
+    y = "Percentage of Missing Values"
+  ) +
+  theme_minimal()
+```
+
+missing values in Proteomics (ruwe data)
+```{r}
+#globale missingness
+sum(is.na(proteins_npx_raw))
+mean(is.na(proteins_npx_raw))*100
+```
+
+```{r}
+missing_prot_raw <- proteins_npx_raw %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "missing_values") %>%
+  mutate(Missing_Percentage = (missing_values / nrow(proteins_npx_raw)) * 100) %>%
+  arrange(desc(Missing_Percentage))
+
+print(missing_prot_raw, n = 40)
+```
+
+
+```{r}
+missing_prot_raw %>%
+  ggplot(aes(x = reorder(Variable, Missing_Percentage), y = Missing_Percentage)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Percentage of Missing Values by Variable", x = "Varibales", y = "Percentage of Missing Values") +
+  theme_minimal()
+```
+
+4. duplicate assays verwijderen
+
+```{r}
+# 1. Vind de 9 paren van hernoemde eiwitten
+pairs_df <- protein_annotation %>%
+  filter(!is.na(same_assay_as)) %>%
+  arrange(n_missing) %>%
+  distinct(olink_id, .keep_all = TRUE)
+
+# 2. Voeg de ontbrekende waarden samen (coalesce) en verwijder de 9 oude kolommen
+proteins_npx_clean <- proteins_npx_raw
+
+for (i in seq_len(nrow(pairs_df))) {
+  new_col <- pairs_df$protein[i]
+  old_col <- pairs_df$same_assay_as[i]
+  
+  proteins_npx_clean[[new_col]] <- coalesce(proteins_npx_clean[[new_col]], proteins_npx_clean[[old_col]])
+  proteins_npx_clean[[old_col]] <- NULL
+}
+
+# 3. Werk ook protein_annotation bij (1472 unieke eiwitten)
+protein_annotation_clean <- protein_annotation %>%
+  filter(!protein %in% pairs_df$same_assay_as) %>%
+  mutate(
+    n_missing = if_else(protein %in% pairs_df$protein, 0L, n_missing),
+    pct_missing = if_else(protein %in% pairs_df$protein, 0.0, pct_missing)
+  )
+```
+
+
+```{r}
+# Controleer of de 9 samengevoegde eiwitten geen missings meer hebben
+colSums(is.na(proteins_npx_clean[pairs_df$protein]))
+```
+```{r}
+# Globale missingness na samenvoegen
+sum(is.na(proteins_npx_clean))
+mean(is.na(proteins_npx_clean)) * 100
+```
+```{r}
+missing_prot_raw1 <- proteins_npx_clean %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "missing_values") %>%
+  mutate(Missing_Percentage = (missing_values / nrow(proteins_npx_clean)) * 100) %>%
+  arrange(desc(Missing_Percentage))
+
+print(missing_prot_raw1, n = 40)
+```
+
+
+5. proteins onder LOD
+```{r}
+summary(protein_annotation_clean$pct_below_lod)
+hist(protein_annotation_clean$pct_below_lod, breaks = 50, main = "Distribution of % below LOD", xlab = "% below LOD")
+table(protein_annotation_clean$pct_below_lod > 50)
+```
+--> 150 EW hebben meer dan 50% van hun metingen onder LOD
+--> Proteins with more than 50% of values below the LOD were excluded because the majority of observations could not be quantified with sufficient confidence
+
+```{r}
+# Verwijder eiwitten met >50% metingen onder LOD
+proteins_keep <- protein_annotation_clean$protein[
+  protein_annotation_clean$pct_below_lod <= 50
+]
+
+proteins_npx_filtered <- proteins_npx_clean %>%
+  dplyr::select(sample_kit_id, all_of(proteins_keep))
+```
+
+```{r}
+# Controleer nieuw aantal kolommen (1 sample_kit_id + 1322 eiwitten = 1323)
+ncol(proteins_npx_filtered)
+```
+```{r}
+# Globale missingness na samenvoegen
+sum(is.na(proteins_npx_filtered))
+mean(is.na(proteins_npx_filtered)) * 100
+```
+
+6. onmogelijke metadata
+
+```{r}
+#screening van de metadata
+numeric_vars <- sample_metadata %>%
+  select(where(is.numeric))
+
+summary_stats <- data.frame(
+  Variable = names(numeric_vars),
+  Min = sapply(numeric_vars, min, na.rm = TRUE),
+  Max = sapply(numeric_vars, max, na.rm = TRUE),
+  Missing = sapply(numeric_vars, function(x) sum(is.na(x)))
+)
+
+summary_stats
+```
+```{r}
+# Zoek negatieve waarden en nullen
+negative_counts <- sapply(numeric_vars, function(x) sum(x < 0, na.rm = TRUE))
+negative_counts[negative_counts > 0]
+
+zero_counts <- sapply(numeric_vars, function(x) sum(x == 0, na.rm = TRUE))
+zero_counts[zero_counts > 0]
+```
+--> geen neg waarden want named integer (0)
+--> de waardes van bmi en weight kunnen niet 0 zijn = onmogelijke waarden
+
+```{r}
+# Maak een opgeschoonde metadata-tabel en vervang 0 door NA bij gewicht en BMI
+sample_metadata_clean <- sample_metadata %>%
+  mutate(
+    am.weight = na_if(am.weight, 0),
+    am.bmi = na_if(am.bmi, 0)
+  )
+```
+
+```{r}
+# Controleer of de nullen vervangen zijn
+summary(sample_metadata_clean$am.weight)
+summary(sample_metadata_clean$am.bmi)
+```
+
+7. Outliers
+
+```{r}
+# Boxplot leeftijd (opgeschoonde metadata)
+boxplot(sample_metadata_clean$sample.subjectAgeAtDraw, main = "Age at Draw", ylab = "Age (years)")
+
+# Boxplot CXCL13 (gefilterde proteomics)
+boxplot(proteins_npx_filtered$CXCL13, main = "CXCL13", ylab = "NPX")
+
+# Tijdelijke koppeling voor boxplot per CMV-groep
+temp_cxcl13 <- inner_join(
+  sample_metadata_clean %>% select(sample_kit_id, cmv_status),
+  proteins_npx_filtered %>% select(sample_kit_id, CXCL13),
+  by = "sample_kit_id"
+)
+
+boxplot(CXCL13 ~ cmv_status, data = temp_cxcl13, main = "CXCL13 by CMV Status", ylab = "NPX")
+length(boxplot.stats(temp_cxcl13$CXCL13)$out)
+```
+--> 31 outliers (waarden van CXCL13 die door boxplotregel (1.5 x IQR) als outlier worden beshouwd)
+--> voorlopig nog niet verwijderen
+--> Boxplot analysis identified 31 potential CXCL13 outliers according to the 1.5×IQR criterion. These observations were retained, as extreme CXCL13 values may reflect genuine biological variation rather than technical artefacts.
+
+8. batch effect analyse (PCA voor correctie)
+
+```{r}
+# Lijn metadata en gefilterde eiwitdata exact op elkaar uit (ook nodig in stap 9)
+meta_aligned <- sample_metadata_clean %>%
+  filter(sample_kit_id %in% proteins_npx_filtered$sample_kit_id) %>%
+  arrange(match(sample_kit_id, proteins_npx_filtered$sample_kit_id))
+
+# PCA op alle 867 stalen
+# De 0,21% ontbrekende waarden worden enkel voor de PCA ingevuld met de mediaan
+# van het eiwit (complete.cases zou 267 stalen en twee volledige batches weglaten)
+protein_matrix_imp <- proteins_npx_filtered %>%
+  select(-sample_kit_id) %>%
+  mutate(across(everything(), ~ replace_na(.x, median(.x, na.rm = TRUE))))
+
+pca_all <- prcomp(protein_matrix_imp, center = TRUE, scale. = TRUE)
+```
+
+```{r}
+# PCA-plots gekleurd volgens batch, CMV-status, leeftijdsgroep en geslacht
+kleur_vars <- c("Olink Batch" = "olink_batch_id",
+                "CMV Status"  = "cmv_status",
+                "Age Group"   = "subject.ageGroup",
+                "Sex"         = "subject.biologicalSex")
+
+for (titel in names(kleur_vars)) {
+  groep <- as.factor(meta_aligned[[kleur_vars[titel]]])
+  plot(pca_all$x[, 1], pca_all$x[, 2],
+       col = groep, pch = 16, xlab = "PC1", ylab = "PC2",
+       main = paste("PCA coloured by", titel))
+  legend("topright", legend = levels(groep),
+         col = seq_along(levels(groep)), pch = 16, cex = 0.8)
+}
+```
+
+```{r}
+# Verklaarde variantie per hoofdcomponent
+summary(pca_all)$importance[, 1:5]
+
+# Functie: per PC het % verklaarde variantie + R² van elke metadatavariabele
+pc_r2 <- function(pca, meta, n_pc = 3) {
+  vars <- c(Batch = "olink_batch_id", Plate = "olink_plate_id", AgeGroup = "subject.ageGroup",
+            Sex = "subject.biologicalSex", CMV = "cmv_status", Subject = "subject.subjectGuid")
+  map_dfr(1:n_pc, function(k) {
+    tibble(PC = paste0("PC", k),
+           Var_explained = round(100 * pca$sdev[k]^2 / sum(pca$sdev^2), 1),
+           !!!map(vars, function(v) round(summary(lm(pca$x[, k] ~ factor(meta[[v]])))$r.squared, 2)))
+  })
+}
+
+pc_r2(pca_all, meta_aligned)
+
+# Verstrengeling batch en leeftijd
+table(meta_aligned$olink_batch_id, meta_aligned$subject.ageGroup)
+```
+
+--> PC1 en PC2 verklaren 25,5% en 9,1% van de variantie. Olink-batch verklaart 67% van PC1 en 71% van PC2, leeftijdsgroep slechts 1% en 12%; geslacht en CMV-status < 1%. Plate verklaart nagenoeg hetzelfde als batch (plates zijn genest in batches).
+--> De stalen groeperen dus vooral volgens technische batch, niet volgens biologie: er is een sterk batch-effect.
+--> Batch en leeftijd zijn deels verstrengeld (batch 20201752: 119 jonge vs 37 oudere stalen), dus bij batchcorrectie moet leeftijd beschermd worden.
+
+9. batchcorrectie 
+
+Om technische variatie tussen de Olink-batches te corrigeren zonder echte biologische signalen (`subject.ageGroup`, `cmv_status`, `subject.biologicalSex`) weg te nemen, gebruiken we `removeBatchEffect()` uit het `limma`-pakket. Deze methode werkt direct op log2-geschaalde NPX-waarden en kan omgaan met de resterende 0,21% niet-geïmputeerde ontbrekende waarden.
+
+```{r}
+# Laad limma
+library(limma)
+```
+
+```{r}
+# 1. Zet gefilterde eiwitdata om naar een matrix (eiwitten als rijen, samples als kolommen voor limma)
+expr_mat <- proteins_npx_filtered %>%
+  select(-sample_kit_id) %>%
+  as.matrix() %>%
+  t()
+
+# 2. Definieer het biologische design zodat deze effecten behouden blijven tijdens correctie
+design_bio <- model.matrix(
+  ~ subject.ageGroup + cmv_status + subject.biologicalSex,
+  data = meta_aligned
+)
+
+# 3. Voer batchcorrectie uit op olink_batch_id
+expr_mat_corrected <- removeBatchEffect(
+  expr_mat,
+  batch = meta_aligned$olink_batch_id,
+  design = design_bio
+)
+
+# 4. Zet de gecorrigeerde matrix terug naar een dataframe (samples als rijen, eiwitten als kolommen)
+proteins_npx_corrected <- as.data.frame(t(expr_mat_corrected)) %>%
+  mutate(sample_kit_id = proteins_npx_filtered$sample_kit_id, .before = 1)
+```
+--> Waarschuwing "Partial NA coefficients for 13 probe(s)": 13 eiwitten ontbreken volledig in één batch, waardoor het batch-effect voor die batch niet geschat kan worden. Voor deze eiwitten is de correctie dus onvolledig. Part 2 en 3 gebruiken de ongecorrigeerde data met batch als covariaat, dus daar speelt dit niet.
+
+```{r}
+# Controleer het resultaat van de batchcorrectie via PCA op alle 867 stalen
+# (mediaan-imputatie enkel voor de PCA, net zoals in stap 8)
+pca_after <- proteins_npx_corrected %>%
+  select(-sample_kit_id) %>%
+  mutate(across(everything(), ~ replace_na(.x, median(.x, na.rm = TRUE)))) %>%
+  prcomp(center = TRUE, scale. = TRUE)
+```
+
+```{r}
+# Vergelijk PCA na batchcorrectie naast elkaar (Batch vs. Age Group)
+par(mfrow = c(1, 2))
+
+for (v in c("olink_batch_id", "subject.ageGroup")) {
+  groep <- as.factor(meta_aligned[[v]])
+  plot(pca_after$x[, 1], pca_after$x[, 2],
+       col = groep, pch = 16, xlab = "PC1", ylab = "PC2",
+       main = paste("PCA na batchcorrectie\n", ifelse(v == "olink_batch_id", "(Batch)", "(Age Group)")))
+  legend("topright", legend = levels(groep),
+         col = seq_along(levels(groep)), pch = 16, cex = 0.7)
+}
+
+par(mfrow = c(1, 1))
+```
+```{r}
+# Figuur 1: PCA vóór (boven) en na (onder) batchcorrectie, gekleurd volgens batch en leeftijdsgroep
+par(mfrow = c(2, 2))
+
+pca_lijst <- list("voor batchcorrectie" = pca_all, "na batchcorrectie" = pca_after)
+
+for (moment in names(pca_lijst)) {
+  p <- pca_lijst[[moment]]
+  for (v in c("olink_batch_id", "subject.ageGroup")) {
+    groep <- as.factor(meta_aligned[[v]])
+    plot(p$x[, 1], p$x[, 2],
+         col = groep, pch = 16, cex = 0.6, xlab = "PC1", ylab = "PC2",
+         main = paste("PCA", moment, "\n", ifelse(v == "olink_batch_id", "(Batch)", "(Age Group)")))
+    legend("topright", legend = levels(groep),
+           col = seq_along(levels(groep)), pch = 16, cex = 0.6)
+  }
+}
+
+par(mfrow = c(1, 1))
+```
+
+```{r}
+# Verklaarde variantie en R² van de metadata na correctie
+summary(pca_after)$importance[, 1:5]
+pc_r2(pca_after, meta_aligned)
+```
+--> Na correctie verklaart batch nog maar 0–2% van de eerste drie PC's (vóór correctie 67% van PC1 en 71% van PC2). De correctie verwijdert dus het technische effect.
+--> Leeftijdsgroep verklaart nu 31% van PC2 (vóór correctie 12%): het leeftijdssignaal wordt zichtbaar.
+--> De persoon (subject-ID) verklaart 45–81% van de eerste PC's: stalen van dezelfde persoon lijken sterk op elkaar. Dat bevestigt dat herhaalde metingen in Part 2 en 3 in rekening gebracht moeten worden.
+--> De gecorrigeerde data dient enkel voor visualisatie. Omdat leeftijdsgroep in het design van de correctie zit, gebruiken we deze dataset niet om leeftijdsgroep te voorspellen in Part 4 (anders lekt label-informatie in de features).
+
+10. definitieve dataset
+In deze laatste stap voegen we de opgeschoonde metadata (`sample_metadata_clean`) samen met de gefilterde eiwitdata. We bewaren zowel de ongecorrigeerde (gefilterde) dataset als de batch-gecorrigeerde dataset, omdat statistische regressiemodellen idealiter `olink_batch_id` als covariaat opnemen op de ongecorrigeerde waarden, terwijl PCA en machine learning de batch-gecorrigeerde dataset gebruiken.
+
+```{r}
+# 1. Merge opgeschoonde metadata met ongecorrigeerde (gefilterde) eiwitten
+final_data_uncorrected <- inner_join(
+  sample_metadata_clean,
+  proteins_npx_filtered,
+  by = "sample_kit_id"
+)
+
+# 2. Merge opgeschoonde metadata met batch-gecorrigeerde eiwitten
+final_data_batch_corrected <- inner_join(
+  sample_metadata_clean,
+  proteins_npx_corrected,
+  by = "sample_kit_id"
+)
+
+# 3. Werk de definitieve eiwit-annotatietabel bij (1322 overgebleven eiwitten)
+protein_annotation_final <- protein_annotation_clean %>%
+  filter(pct_below_lod <= 50)
+```
+
+```{r}
+# 4. Eindcontrole op aantallen rijen, kolommen en kritieke variabelen
+cat("Dimensies ongecorrigeerde dataset:", dim(final_data_uncorrected), "\n")
+cat("Dimensies batch-gecorrigeerde dataset:", dim(final_data_batch_corrected), "\n")
+cat("Aantal unieke samples:", n_distinct(final_data_batch_corrected$sample_kit_id), "\n")
+cat("Aantal eiwitten over:", nrow(protein_annotation_final), "\n")
+cat("Missings in CXCL13:", sum(is.na(final_data_batch_corrected$CXCL13)), "\n")
+cat("Missings in ageGroup:", sum(is.na(final_data_batch_corrected$subject.ageGroup)), "\n")
+cat("Missings in cmv_status:", sum(is.na(final_data_batch_corrected$cmv_status)), "\n")
+```
+```{r}
+# 5. Exporteer de definitieve bestanden voor Part 2 en Part 3
+write_csv(final_data_uncorrected, "final_data_uncorrected.csv")
+write_csv(final_data_batch_corrected, "final_data_batch_corrected.csv")
+write_csv(protein_annotation_final, "protein_annotation_final.csv")
